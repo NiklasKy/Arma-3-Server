@@ -280,8 +280,8 @@ function Invoke-LogRotation {
     #   .rpt  – main server / HC report logs  (arma3server*.rpt)
     #   .log  – server_console_*.log, mpStatistics_*.log, rating.log, etc.
     #   .txt  – mpMessageDetailsServer-*.txt  (message detail dumps)
-    $files = Get-ChildItem -Path $ProfileDir -File |
-             Where-Object { $_.Extension -in @(".rpt", ".log", ".txt") }
+    $files = @(Get-ChildItem -Path $ProfileDir -File |
+               Where-Object { $_.Extension -in @(".rpt", ".log", ".txt") })
 
     if ($files.Count -eq 0) {
         Write-Log "Log rotation: no previous log files found." "Info"
