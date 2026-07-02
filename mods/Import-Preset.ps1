@@ -210,12 +210,12 @@ if ($Merge) {
         }
     }
 
-    $toAdd = $parsed | Where-Object { -not $existingIds.ContainsKey($_.Id) }
+    $toAdd = @($parsed | Where-Object { -not $existingIds.ContainsKey($_.Id) })
     Write-Log "Merge mode: adding $($toAdd.Count) new mod(s), keeping $($existingIds.Count) existing." "Info"
 
     $newWorkshopIds = @()
     if ($profileData.PSObject.Properties.Name -contains "WorkshopIds") {
-        $newWorkshopIds += $profileData.WorkshopIds
+        $newWorkshopIds += @($profileData.WorkshopIds)
     }
     foreach ($mod in $toAdd) {
         $newWorkshopIds += [PSCustomObject]@{
@@ -228,21 +228,21 @@ if ($Merge) {
     # Replace the entire list
     Write-Log "Replace mode: replacing mod list with $($parsed.Count) mod(s) from preset." "Info"
 
-    $newWorkshopIds = $parsed | ForEach-Object {
+    $newWorkshopIds = @($parsed | ForEach-Object {
         [PSCustomObject]@{
             Id         = $_.Id
             FolderName = $_.FolderName
             _name      = $_.DisplayName
         }
-    }
+    })
 }
 
 # Build Mods array (just the folder names, for -mod= parameter).
 # Client-side GRP9 mods are published through Steam Workshop and should come
 # from the imported preset instead of being forced into every profile.
-$newMods = Add-UniqueString `
+$newMods = @(Add-UniqueString `
     -Items ([string[]]($newWorkshopIds | Select-Object -ExpandProperty FolderName)) `
-    -Required @()
+    -Required @())
 
 # ---------------------------------------------------------------------------
 # Format profile.json in a clean, human-readable style:
@@ -335,9 +335,9 @@ $existingServerMods = @()
 if ($profileData.PSObject.Properties.Name -contains "ServerMods") {
     $existingServerMods = @($profileData.ServerMods | Where-Object { $_ })
 }
-$existingServerMods = Add-UniqueString `
+$existingServerMods = @(Add-UniqueString `
     -Items ([string[]]$existingServerMods) `
-    -Required $RequiredServerMods
+    -Required $RequiredServerMods)
 
 $existingExtraArgs = @()
 if ($profileData.PSObject.Properties.Name -contains "ExtraArgs") {
