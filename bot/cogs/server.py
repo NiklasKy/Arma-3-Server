@@ -25,6 +25,7 @@ _LIVE_UPDATE_INTERVAL = 30   # seconds between embed refreshes
 _LIVE_MAX_RUNTIME     = 48   # hours before auto-stop (safety cap)
 _LIVE_START_GRACE     = 300  # seconds to tolerate missing process during startup
 _LIVE_MISS_LIMIT      = 3    # consecutive misses after startup before marking offline
+_WEBHOOK_TOKEN_ERROR_CODES = {50027, 10015}  # Invalid Webhook Token / Unknown Webhook
 
 
 def _ps_quote(value: str) -> str:
@@ -155,6 +156,47 @@ class ServerCog(commands.Cog):
         self.bot = bot
         # profile → running asyncio.Task
         self._live_tasks: dict[str, asyncio.Task] = {}
+
+    async def _edit_live_status_message(
+        self,
+        channel: discord.abc.Messageable,
+        status_msg: discord.Message,
+        profile: str,
+        embed: discord.Embed,
+    ) -> tuple[discord.Message, bool]:
+        """Edit the live-status message, replacing stale webhook messages when needed."""
+        try:
+            await status_msg.edit(embed=embed)
+            return status_msg, True
+        except discord.NotFound as exc:
+            if getattr(exc, "code", None) in _WEBHOOK_TOKEN_ERROR_CODES:
+                logger.warning(
+                    "Live-status webhook message for %s is stale (%s); posting a fresh channel message.",
+                    profile,
+                    exc,
+                )
+                try:
+                    return await channel.send(embed=embed), True
+                except discord.HTTPException as send_exc:
+                    logger.warning("Could not replace live-status message for %s: %s", profile, send_exc)
+                    return status_msg, True
+
+            logger.info("Live-status message deleted — stopping loop for %s", profile)
+            return status_msg, False
+        except discord.HTTPException as exc:
+            if getattr(exc, "code", None) in _WEBHOOK_TOKEN_ERROR_CODES or "Invalid Webhook Token" in str(exc):
+                logger.warning(
+                    "Live-status edit for %s failed because the webhook token is invalid; posting a fresh channel message.",
+                    profile,
+                )
+                try:
+                    return await channel.send(embed=embed), True
+                except discord.HTTPException as send_exc:
+                    logger.warning("Could not replace live-status message for %s: %s", profile, send_exc)
+                    return status_msg, True
+
+            logger.warning("Edit failed: %s", exc)
+            return status_msg, True
 
     # ── internal: query process stats via SSH ──────────────────────────────────
 
@@ -314,13 +356,9 @@ class ServerCog(commands.Cog):
                     saw_running = True
                     embed = _build_live_embed(profile, proc, a2s_info)
 
-                try:
-                    await status_msg.edit(embed=embed)
-                except discord.NotFound:
-                    logger.info("Live-status message deleted — stopping loop for %s", profile)
+                status_msg, keep_running = await self._edit_live_status_message(channel, status_msg, profile, embed)
+                if not keep_running:
                     return
-                except discord.HTTPException as exc:
-                    logger.warning("Edit failed: %s", exc)
 
                 if proc is None and not (not saw_running and (loop.time() - started_at) < _LIVE_START_GRACE):
                     if saw_running and miss_count < _LIVE_MISS_LIMIT:
@@ -334,10 +372,7 @@ class ServerCog(commands.Cog):
         except asyncio.CancelledError:
             # /server stop was called — update embed to offline
             embed = _build_live_embed(profile, None, None)
-            try:
-                await status_msg.edit(embed=embed)
-            except discord.HTTPException:
-                pass
+            await self._edit_live_status_message(channel, status_msg, profile, embed)
             return
 
         finally:
@@ -346,10 +381,7 @@ class ServerCog(commands.Cog):
         if not stopped:
             # Safety-cap reached
             embed = _build_live_embed(profile, None, None)
-            try:
-                await status_msg.edit(embed=embed)
-            except discord.HTTPException:
-                pass
+            await self._edit_live_status_message(channel, status_msg, profile, embed)
 
     # ── /server start ─────────────────────────────────────────────────────────
 
@@ -383,12 +415,17 @@ class ServerCog(commands.Cog):
         pid, port   = info
         query_port  = port + 1
 
-        # Post the initial status embed as a follow-up (separate from the start reply)
+        # Post the live-status embed as a normal bot message. Interaction follow-up
+        # messages are webhook-backed and their edit token expires.
         init_embed = _build_live_embed(profile, {"cpu_pct": 0.0, "ram_mb": 0, "uptime_s": 0, "proc_count": 1, "cores": 1, "pid": pid}, None)
         init_embed.title = f"🟡  Server Starting — `{profile}`"
         init_embed.color = discord.Color.yellow()
 
-        status_msg = await interaction.followup.send(embed=init_embed)
+        if interaction.channel is None:
+            logger.warning("Could not start live-status for %s (interaction has no channel)", profile)
+            return
+
+        status_msg = await interaction.channel.send(embed=init_embed)
 
         # Launch background task
         task = asyncio.create_task(
