@@ -4,6 +4,8 @@ Includes a persistent live-status embed that updates every 30 s after server sta
 """
 
 import asyncio
+import base64
+import binascii
 import logging
 import re
 from datetime import datetime, timezone
@@ -82,6 +84,9 @@ def _build_live_embed(
     profile: str,
     proc: dict | None,
     a2s_info: dict | None,
+    *,
+    a2s_stale: bool = False,
+    mission_override: str | None = None,
 ) -> discord.Embed:
     """Build the live-status embed from gathered stats."""
     if proc is None:
@@ -107,12 +112,12 @@ def _build_live_embed(
         )
         embed.add_field(
             name="🗺️  Mission",
-            value=a2s_info["map"] or "—",
+            value=mission_override or a2s_info["map"] or "—",
             inline=True,
         )
     else:
         embed.add_field(name="👥  Players", value="—", inline=True)
-        embed.add_field(name="🗺️  Mission", value="Starting…", inline=True)
+        embed.add_field(name="🗺️  Mission", value=mission_override or "Query unavailable", inline=True)
 
     proc_count = proc.get("proc_count", 1)
     cores      = proc.get("cores", 1)
@@ -127,7 +132,14 @@ def _build_live_embed(
     embed.add_field(name="🔢  PID",       value=str(proc["pid"]),                inline=True)
     embed.add_field(name="⚙️  Processes", value=f"{proc_count} ({cores} cores)", inline=True)
 
-    embed.set_footer(text=f"Profile: {profile}  •  CPU & RAM = server + all HCs  •  refresh every {_LIVE_UPDATE_INTERVAL}s")
+    footer = f"Profile: {profile}  •  CPU & RAM = server + all HCs  •  refresh every {_LIVE_UPDATE_INTERVAL}s"
+    if a2s_stale and mission_override:
+        footer += "  •  Mission from RPT; players are last known A2S values"
+    elif a2s_stale:
+        footer += "  •  A2S unavailable; showing last known query values"
+    elif mission_override:
+        footer += "  •  Mission from RPT; A2S unavailable"
+    embed.set_footer(text=footer)
     return embed
 
 
@@ -275,19 +287,56 @@ class ServerCog(commands.Cog):
 
     # ── internal: A2S query (run in thread — library is synchronous) ──────────
 
-    async def _get_a2s_info(self, host: str, query_port: int) -> dict | None:
-        """Query the Arma 3 server via Steam A2S. Returns None if unavailable."""
+    async def _get_a2s_info(self, host: str, query_port: int) -> tuple[dict | None, str | None]:
+        """Query Steam A2S and return the result plus a diagnostic error string."""
         try:
             info = await asyncio.to_thread(
                 a2s.info, (host, query_port), timeout=2.0
             )
-            return {
-                "players":     info.player_count,
-                "max_players": info.max_players,
-                "map":         info.map_name,
-            }
-        except Exception:
+            return (
+                {
+                    "players":     info.player_count,
+                    "max_players": info.max_players,
+                    "map":         info.map_name,
+                },
+                None,
+            )
+        except Exception as exc:
+            return None, f"{type(exc).__name__}: {exc}"
+
+    async def _get_rpt_mission(self, profile: str) -> str | None:
+        """Read the latest loaded mission from the main server RPT via SSH."""
+        profile_dir = f"{config.SCRIPTS_PATH.rstrip('\\')}\\profiles\\{profile}"
+        ps = (
+            "$ProgressPreference = 'SilentlyContinue'; "
+            f"$profileDir = {_ps_quote(profile_dir)}; "
+            "$rpt = @(Get-ChildItem -LiteralPath $profileDir -File -Filter 'arma3server*.rpt' "
+            "  -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1); "
+            "if (-not $rpt) { exit 0 } "
+            "$match = @(Get-Content -LiteralPath $rpt[0].FullName -Tail 10000 -ErrorAction SilentlyContinue | "
+            "  Select-String -Pattern '^\\d{1,2}:\\d{2}:\\d{2} Mission (.+?): Number of roles' | "
+            "  Select-Object -Last 1); "
+            "if ($match -and $match[0].Matches.Count -gt 0) { "
+            "  $mission = $match[0].Matches[0].Groups[1].Value.Trim(); "
+            "  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($mission)); "
+            "  \"mission64|$encoded\" "
+            "}"
+        )
+        code, out = await ssh_helper.run_ps_command(ps)
+        if code != 0:
+            logger.debug("Could not read RPT mission for %s (exit=%d)", profile, code)
             return None
+
+        for line in out.splitlines():
+            match = re.match(r"^mission64\|([A-Za-z0-9+/=]+)$", line.strip())
+            if not match:
+                continue
+            try:
+                return base64.b64decode(match.group(1), validate=True).decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError):
+                logger.debug("Could not decode RPT mission for %s", profile)
+                return None
+        return None
 
     # ── internal: read PID + port from host after start ───────────────────────
 
@@ -328,11 +377,46 @@ class ServerCog(commands.Cog):
         stopped     = False
         miss_count  = 0
         saw_running = False
+        last_a2s_info: dict | None = None
+        last_rpt_mission: str | None = None
+        a2s_miss_count = 0
 
         try:
             while loop.time() < deadline:
-                proc     = await self._get_proc_stats(profile, pid, query_port - 1)
-                a2s_info = await self._get_a2s_info(host, query_port) if proc else None
+                proc = await self._get_proc_stats(profile, pid, query_port - 1)
+                fresh_a2s_info, a2s_error = (
+                    await self._get_a2s_info(host, query_port) if proc else (None, None)
+                )
+
+                if proc and fresh_a2s_info:
+                    last_a2s_info = fresh_a2s_info
+                    a2s_miss_count = 0
+                elif proc:
+                    a2s_miss_count += 1
+                    refresh_rpt_mission = a2s_miss_count == 1 or a2s_miss_count % 10 == 0
+                    if refresh_rpt_mission:
+                        rpt_mission = await self._get_rpt_mission(profile)
+                        if rpt_mission:
+                            last_rpt_mission = rpt_mission
+                        if last_rpt_mission:
+                            fallback_status = "using mission from RPT"
+                        elif last_a2s_info:
+                            fallback_status = "keeping last known values"
+                        else:
+                            fallback_status = "no query values received yet"
+                        logger.warning(
+                            "A2S query unavailable for %s on %s:%d (miss=%d, error=%s); %s",
+                            profile,
+                            host,
+                            query_port,
+                            a2s_miss_count,
+                            a2s_error or "unknown",
+                            fallback_status,
+                        )
+
+                a2s_info = fresh_a2s_info or last_a2s_info
+                a2s_stale = fresh_a2s_info is None and last_a2s_info is not None
+                mission_override = last_rpt_mission if fresh_a2s_info is None else None
 
                 if proc is None:
                     miss_count += 1
@@ -354,7 +438,13 @@ class ServerCog(commands.Cog):
                 else:
                     miss_count = 0
                     saw_running = True
-                    embed = _build_live_embed(profile, proc, a2s_info)
+                    embed = _build_live_embed(
+                        profile,
+                        proc,
+                        a2s_info,
+                        a2s_stale=a2s_stale,
+                        mission_override=mission_override,
+                    )
 
                 status_msg, keep_running = await self._edit_live_status_message(channel, status_msg, profile, embed)
                 if not keep_running:
@@ -417,9 +507,7 @@ class ServerCog(commands.Cog):
 
         # Post the live-status embed as a normal bot message. Interaction follow-up
         # messages are webhook-backed and their edit token expires.
-        init_embed = _build_live_embed(profile, {"cpu_pct": 0.0, "ram_mb": 0, "uptime_s": 0, "proc_count": 1, "cores": 1, "pid": pid}, None)
-        init_embed.title = f"🟡  Server Starting — `{profile}`"
-        init_embed.color = discord.Color.yellow()
+        init_embed = _build_starting_embed(profile, pid, 0)
 
         if interaction.channel is None:
             logger.warning("Could not start live-status for %s (interaction has no channel)", profile)
