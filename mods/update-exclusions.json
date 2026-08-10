@@ -1,4 +1,13 @@
 {
   "_comment": "Workshop IDs listed here are skipped by update mode. Normal sync and force sync are unaffected.",
-  "WorkshopIds": []
+  "WorkshopIds": [
+    {
+      "Id": "3688394241",
+      "Reason": "Steam metadata returns FileNotFound; keep the installed version pinned"
+    },
+    {
+      "Id": "3746680265",
+      "Reason": "Steam metadata returns FileNotFound; keep the installed version pinned"
+    }
+  ]
 }

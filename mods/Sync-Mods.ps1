@@ -397,8 +397,14 @@ foreach ($mod in $modList) {
     }
 
     $remote = $workshopDetails[$id]
-    if ([int]$remote.result -ne 1 -or [long]$remote.consumer_app_id -ne $ArmaAppId) {
-        Write-Log "Workshop item $id is unavailable or does not belong to Arma 3. Skipping." "Error"
+    $steamResult = [int]$remote.result
+    if ($steamResult -ne 1) {
+        Write-Log "Workshop item $id returned Steam result $steamResult. Add it to update-exclusions.json only when the installed version should remain pinned." "Error"
+        $failed++
+        continue
+    }
+    if ([long]$remote.consumer_app_id -ne $ArmaAppId) {
+        Write-Log "Workshop item $id does not belong to Arma 3. Skipping." "Error"
         $failed++
         continue
     }
