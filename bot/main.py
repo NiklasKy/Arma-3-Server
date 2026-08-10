@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 COGS = [
     "cogs.server",
     "cogs.mods",
+    "cogs.automation",
 ]
 
 

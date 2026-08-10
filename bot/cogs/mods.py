@@ -3,6 +3,7 @@
 """
 
 import logging
+import re
 from datetime import datetime
 
 import discord
@@ -15,6 +16,8 @@ import utils
 
 logger = logging.getLogger(__name__)
 
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 async def _deny(interaction: discord.Interaction) -> None:
     embed = discord.Embed(
@@ -25,12 +28,27 @@ async def _deny(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+async def _reject_invalid_profile(interaction: discord.Interaction, profile: str) -> bool:
+    """Reject profile names before they are passed to the remote PowerShell host."""
+    if profile == "_all" or _PROFILE_NAME_RE.fullmatch(profile):
+        return False
+
+    embed = discord.Embed(
+        title="Invalid Profile",
+        description="Profile names may only contain letters, numbers, underscores, and hyphens.",
+        color=discord.Color.red(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    return True
+
+
 async def _reply(
     interaction: discord.Interaction,
     title: str,
     code: int,
     output: str,
     fields: dict[str, str] | None = None,
+    status_message: discord.Message | None = None,
 ) -> None:
     """Filter output first, then build embed + send overflow follow-ups."""
     filtered = ssh_helper.filter_output(output)
@@ -50,11 +68,17 @@ async def _reply(
 
     embed.add_field(name="Output", value=f"```\n{embed_chunks[0]}\n```", inline=False)
 
-    await interaction.edit_original_response(embed=embed)
+    if status_message is None:
+        await interaction.edit_original_response(embed=embed)
+    else:
+        await status_message.edit(embed=embed)
 
     # Send any chunks beyond the first as plain follow-up messages
     for chunk in overflow_chunks[1:]:
-        await interaction.followup.send(f"```\n{chunk}\n```")
+        if status_message is None:
+            await interaction.followup.send(f"```\n{chunk}\n```")
+        else:
+            await status_message.channel.send(f"```\n{chunk}\n```")
 
 
 # ── Cog ────────────────────────────────────────────────────────────────────────
@@ -79,6 +103,8 @@ class ModsCog(commands.Cog):
     ) -> None:
         if not utils.has_admin_auth(interaction):
             return await _deny(interaction)
+        if await _reject_invalid_profile(interaction, profile):
+            return
 
         await interaction.response.defer(thinking=True)
         logger.info("mods sync requested by %s — profile: %s force: %s", interaction.user, profile, force)
@@ -91,6 +117,92 @@ class ModsCog(commands.Cog):
             code,
             out,
             fields={"Profile": f"`{profile}`", "Force": "Yes" if force else "No"},
+        )
+
+    # ── /mods update ─────────────────────────────────────────────────────────
+
+    @mods.command(name="update", description="Check for and deploy Workshop mod updates")
+    @app_commands.describe(
+        profile="Profile name (e.g. main, star_wars)",
+        restart_server="Restart the profile automatically when updates are found",
+        check_only="Only report pending updates without downloading them",
+    )
+    async def mods_update(
+        self,
+        interaction: discord.Interaction,
+        profile: str,
+        restart_server: bool = False,
+        check_only: bool = False,
+    ) -> None:
+        if not utils.has_admin_auth(interaction):
+            return await _deny(interaction)
+        if await _reject_invalid_profile(interaction, profile):
+            return
+        if profile == "_all" and restart_server:
+            embed = discord.Embed(
+                title="Invalid Update Options",
+                description="Automatic restart requires one concrete profile, not `_all`.",
+                color=discord.Color.red(),
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        if check_only and restart_server:
+            embed = discord.Embed(
+                title="Invalid Update Options",
+                description="Check-only mode cannot restart the server.",
+                color=discord.Color.red(),
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        await interaction.response.defer(thinking=True)
+        logger.info(
+            "mods update requested by %s — profile: %s restart: %s check_only: %s",
+            interaction.user,
+            profile,
+            restart_server,
+            check_only,
+        )
+
+        extra = f"-Profile {profile} -Update"
+        if restart_server:
+            extra += " -RestartServer"
+        if check_only:
+            extra += " -CheckOnly"
+
+        status_message = None
+        if interaction.channel is not None:
+            started_embed = discord.Embed(
+                title="Workshop Update Running",
+                description=f"Checking profile `{profile}` and processing required updates...",
+                color=discord.Color.yellow(),
+                timestamp=datetime.utcnow(),
+            )
+            try:
+                status_message = await interaction.channel.send(embed=started_embed)
+            except discord.HTTPException as exc:
+                logger.warning("Could not create persistent mod-update status message: %s", exc)
+
+            if status_message is not None:
+                try:
+                    await interaction.edit_original_response(
+                        content=f"Workshop update started: {status_message.jump_url}"
+                    )
+                except discord.HTTPException as exc:
+                    logger.warning("Could not link persistent mod-update status message: %s", exc)
+
+        code, out = await ssh_helper.run_ps_file("mods/Sync-Mods.ps1", extra)
+        await _reply(
+            interaction,
+            "Update Mods",
+            code,
+            out,
+            fields={
+                "Profile": f"`{profile}`",
+                "Restart": "Yes" if restart_server else "No",
+                "Check only": "Yes" if check_only else "No",
+            },
+            status_message=status_message,
         )
 
     # ── /mods import-preset ───────────────────────────────────────────────────
@@ -115,6 +227,8 @@ class ModsCog(commands.Cog):
     ) -> None:
         if not utils.has_admin_auth(interaction):
             return await _deny(interaction)
+        if await _reject_invalid_profile(interaction, profile):
+            return
 
         # Validate before deferring so the error shows without a thinking spinner
         if not preset_html.filename.lower().endswith(".html"):

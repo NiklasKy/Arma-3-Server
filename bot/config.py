@@ -20,6 +20,35 @@ def _parse_ids(env_var: str, default: str = "") -> set[int]:
         raise ValueError(f"Invalid IDs in {env_var}='{raw}': {exc}") from exc
 
 
+def _parse_bool(env_var: str, default: bool = False) -> bool:
+    """Parse an explicit boolean environment value."""
+    raw = os.getenv(env_var)
+    if raw is None or not raw.strip():
+        return default
+
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean in {env_var}='{raw}'")
+
+
+def _parse_bounded_int(env_var: str, default: int, minimum: int, maximum: int) -> int:
+    """Parse an integer and reject values outside an operationally safe range."""
+    raw = os.getenv(env_var, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer in {env_var}='{raw}'") from exc
+
+    if not minimum <= value <= maximum:
+        raise ValueError(
+            f"{env_var} must be between {minimum} and {maximum}, got {value}"
+        )
+    return value
+
+
 # ── Discord ────────────────────────────────────────────────────────────────────
 DISCORD_TOKEN    = os.environ["DISCORD_BOT_TOKEN"]
 GUILD_ID         = int(os.environ["DISCORD_GUILD_ID"])
@@ -43,6 +72,18 @@ SCRIPTS_PATH     = os.environ["BOT_SCRIPTS_PATH"]
 
 # Host used by the bot container to reach the Arma 3 server query port (A2S)
 SERVER_HOST      = os.getenv("BOT_SERVER_HOST", "host.docker.internal")
+
+# Automatic maintenance. Disabled until explicitly enabled in .env.
+AUTO_UPDATE_ENABLED = _parse_bool("BOT_AUTO_UPDATE_ENABLED", False)
+AUTO_UPDATE_INTERVAL_MINUTES = _parse_bounded_int(
+    "BOT_AUTO_UPDATE_INTERVAL_MINUTES", 60, 5, 10080
+)
+AUTO_UPDATE_INITIAL_DELAY_SECONDS = _parse_bounded_int(
+    "BOT_AUTO_UPDATE_INITIAL_DELAY_SECONDS", 120, 0, 86400
+)
+AUTO_UPDATE_TIMEOUT_MINUTES = _parse_bounded_int(
+    "BOT_AUTO_UPDATE_TIMEOUT_MINUTES", 180, 5, 1440
+)
 
 # ── Misc ───────────────────────────────────────────────────────────────────────
 MAX_CHARS        = 1900   # Discord message limit is 2000; keep buffer for code-block markers

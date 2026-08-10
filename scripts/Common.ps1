@@ -647,6 +647,74 @@ function Get-ServerProcesses {
     return Get-Process -Name "arma3server*" -ErrorAction SilentlyContinue
 }
 
+function Enter-FrameworkMaintenanceLock {
+    <#
+    .SYNOPSIS
+        Acquires the cross-process lock used by server starts and maintenance jobs.
+    .OUTPUTS
+        An open FileStream when acquired, or $null when another operation holds it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$Purpose
+    )
+
+    New-Item -ItemType Directory -Path $Config.WorkshopStagingPath -Force | Out-Null
+    $lockPath = Join-Path $Config.WorkshopStagingPath ".arma3-framework-maintenance.lock"
+
+    try {
+        $stream = [System.IO.File]::Open(
+            $lockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+    } catch [System.IO.IOException] {
+        return $null
+    }
+
+    try {
+        $payload = [ordered]@{
+            ProcessId = $PID
+            Purpose = $Purpose
+            StartedAtUtc = [DateTime]::UtcNow.ToString("o")
+        } | ConvertTo-Json -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        $stream.SetLength(0)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+    } catch {
+        $stream.Dispose()
+        throw
+    }
+
+    Write-Output -NoEnumerate $stream
+}
+
+function Exit-FrameworkMaintenanceLock {
+    <#
+    .SYNOPSIS
+        Releases a lock returned by Enter-FrameworkMaintenanceLock.
+    #>
+    [CmdletBinding()]
+    param(
+        [System.IO.FileStream]$Lock,
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    if ($Lock) {
+        $Lock.Dispose()
+    }
+
+    $lockPath = Join-Path $Config.WorkshopStagingPath ".arma3-framework-maintenance.lock"
+    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+}
+
 function Wait-ServerReady {
     <#
     .SYNOPSIS

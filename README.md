@@ -78,6 +78,38 @@ This script reads the `WorkshopIds` list from `profiles\main\profile.json`, down
 SteamCMD, renames the folder to the configured `@name`, and copies `.bikey` files to the server's
 `keys\` directory.
 
+To check for Workshop updates without downloading them:
+
+```powershell
+.\mods\Sync-Mods.ps1 -Profile main -Update -CheckOnly
+```
+
+To deploy only changed mods and automatically restart a running profile:
+
+```powershell
+.\mods\Sync-Mods.ps1 -Profile main -Update -RestartServer
+```
+
+The first update run refreshes all existing mods once to establish a trusted
+deployment baseline. Later runs compare Steam Workshop timestamps and skip
+unchanged items. Deployment uses a temporary folder and restores the previous
+mod folder if replacement fails.
+
+Workshop items which must stay pinned can be listed in
+`mods\update-exclusions.json`. Exclusions apply to update mode, including the
+automatic updater, but do not affect normal or forced syncs:
+
+```json
+{
+  "WorkshopIds": [
+    {
+      "Id": "1234567890",
+      "Reason": "Pinned for mission compatibility"
+    }
+  ]
+}
+```
+
 ### 5. Start the server
 
 ```powershell
@@ -111,7 +143,7 @@ Arma 3 Server\                    ← This repository
 │   ├── ssh_helper.py              ← SSH exec + SFTP upload helpers
 │   ├── cogs\
 │   │   ├── server.py              ← /server GroupCog
-│   │   └── mods.py                ← /mods GroupCog (sync + import-preset)
+│   │   └── mods.py                ← /mods GroupCog (sync + update + import-preset)
 │   ├── Dockerfile                 ← python:3.12-slim image
 │   ├── requirements.txt           ← Python dependencies
 │   └── setup-ssh-key.ps1          ← One-time SSH key + Windows user setup
@@ -280,6 +312,11 @@ DISCORD_GUILD_ID=your_guild_id_here
 DISCORD_ADMIN_ROLE_ID=your_admin_role_id_here
 BOT_SSH_USER=arma_bot
 BOT_SCRIPTS_PATH=C:\#Arma Server\Framework\Arma-3-Server
+
+BOT_AUTO_UPDATE_ENABLED=true
+BOT_AUTO_UPDATE_INTERVAL_MINUTES=60
+BOT_AUTO_UPDATE_INITIAL_DELAY_SECONDS=120
+BOT_AUTO_UPDATE_TIMEOUT_MINUTES=180
 ```
 
 Get the bot token from the [Discord Developer Portal](https://discord.com/developers/applications).
@@ -294,6 +331,19 @@ docker compose up -d
 The bot registers slash commands to the configured guild on startup.
 Use `docker compose logs -f arma-bot` to monitor the output.
 
+### Automatic Updates
+
+When `BOT_AUTO_UPDATE_ENABLED=true`, the bot runs `scripts\Auto-Update.ps1`
+after the initial delay and then waits the configured interval between cycles.
+Each cycle updates the currently installed Arma 3 server branch and all
+Workshop mods referenced by any profile.
+
+The cycle is skipped when any `arma3server*` process is active. A shared
+maintenance lock also blocks framework-driven server starts while SteamCMD is
+running. Failed cycles are written to `bot\logs\bot.log` and retried at the next
+interval. Automated Workshop downloads require valid non-interactive
+`STEAM_USERNAME` and `STEAM_PASSWORD` values in `.env`.
+
 ### Available Slash Commands
 
 | Command | Parameters | Action |
@@ -302,7 +352,8 @@ Use `docker compose logs -f arma-bot` to monitor the output.
 | `/server stop` | `profile` | `Stop-Server.ps1 -Profile <p>` |
 | `/server status` | – | Lists running `arma3*` processes (CPU + RAM) |
 | `/server update` | – | `Update-Server.ps1` |
-| `/mods sync` | `profile`, `force` | `Sync-Mods.ps1 -Profile <p>` |
+| `/mods sync` | `profile`, `force` | Download missing mods or force a complete refresh |
+| `/mods update` | `profile`, `restart_server`, `check_only` | Check and deploy only changed Workshop mods |
 | `/mods import-preset` | `profile`, `preset_html`, `merge`, `sync_after` | Upload HTML preset → `Import-Preset.ps1` |
 
 All commands require the Discord role set in `DISCORD_ADMIN_ROLE_ID`.
@@ -319,8 +370,9 @@ bot\
 ├── config.py            ← All configuration from .env
 ├── ssh_helper.py        ← SSH exec + SFTP upload helpers
 ├── cogs\
+│   ├── automation.py    ← Background idle-only update scheduler
 │   ├── server.py        ← /server Cog (start, stop, status, update)
-│   └── mods.py          ← /mods Cog (sync, import-preset)
+│   └── mods.py          ← /mods Cog (sync, update, import-preset)
 ├── logs\                ← Runtime logs (git-ignored, persisted via volume)
 ├── Dockerfile           ← python:3.12-slim image
 ├── .dockerignore        ← Excludes ssh_key, .env, logs, __pycache__

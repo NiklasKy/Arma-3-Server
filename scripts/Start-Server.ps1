@@ -54,6 +54,12 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Config  = Get-FrameworkConfig
 $Prof    = Get-Profile -ProfileName $Profile
 
+$maintenanceLock = Enter-FrameworkMaintenanceLock -Config $Config -Purpose "server-start:$Profile"
+if ($null -eq $maintenanceLock) {
+    Write-Log "Server start blocked because a framework maintenance operation is running." "Error"
+    exit 1
+}
+
 Write-Log "=== Starting Arma 3 Server: $Profile ===" "Header"
 Write-Log "Branch     : $($Prof.Branch)" "Info"
 Write-Log "Port       : $($Prof.Port)" "Info"
@@ -160,6 +166,11 @@ Write-Log "Server started  (PID: $serverPid)" "Success"
 $pidFile = Join-Path $Prof.ProfileDir "server.pid"
 Set-Content -Path $pidFile -Value $serverPid -Encoding ASCII
 Write-Log "PID saved to: $pidFile" "Info"
+
+# The update job only needs to exclude the launch itself. Once the process is
+# visible, subsequent update cycles will skip because an Arma process is active.
+Exit-FrameworkMaintenanceLock -Lock $maintenanceLock -Config $Config
+$maintenanceLock = $null
 
 # ---------------------------------------------------------------------------
 # Headless Clients
