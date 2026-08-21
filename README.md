@@ -37,6 +37,7 @@ notepad .env
 
 ```dotenv
 SERVER_INSTALL_PATH=D:\Arma3Server
+SERVER_UPDATE_BRANCH=public
 STEAMCMD_PATH=D:\SteamCMD
 WORKSHOP_STAGING_PATH=D:\Arma3Workshop
 
@@ -57,16 +58,24 @@ STEAM_USERNAME=your_steam_username
 
 This script:
 - Downloads and extracts SteamCMD to `SteamCMDPath`
-- Installs Arma 3 Dedicated Server (App ID 233780) to `ServerInstallPath`
+- Installs the public Arma 3 Dedicated Server package (App ID 233780) anonymously
+- Installs profiling from the full Arma 3 package (App ID 107410) using the Steam account in `.env`
 - Uses the `public` branch by default (pass `-Branch profiling` to use the profiling branch)
+
+The Steam account must own Arma 3 for profiling branch installs and updates.
 
 ### 3. Update the server (or switch branches)
 
 ```powershell
-.\setup\Update-Server.ps1                     # update on current branch
+.\setup\Update-Server.ps1                     # update the last recorded branch
 .\setup\Update-Server.ps1 -Branch profiling   # switch to profiling branch
 .\setup\Update-Server.ps1 -Branch public      # switch back to stable
 ```
+
+Public updates use App ID 233780 with anonymous login. Profiling updates use
+App ID 107410 and `STEAM_USERNAME` / `STEAM_PASSWORD` from `.env`. The updater
+records the successfully installed branch in `.arma3-server-branch` inside the
+server installation directory.
 
 ### 4. Download and deploy Workshop mods
 
@@ -335,8 +344,9 @@ Use `docker compose logs -f arma-bot` to monitor the output.
 
 When `BOT_AUTO_UPDATE_ENABLED=true`, the bot runs `scripts\Auto-Update.ps1`
 after the initial delay and then waits the configured interval between cycles.
-Each cycle updates the currently installed Arma 3 server branch and all
-Workshop mods referenced by any profile.
+Each cycle updates `SERVER_UPDATE_BRANCH` from `.env` and all Workshop mods
+referenced by any profile. Set it to `profiling` to use App ID 107410 with the
+configured Steam account during unattended updates.
 
 The cycle is skipped when any `arma3server*` process is active. A shared
 maintenance lock also blocks framework-driven server starts while SteamCMD is

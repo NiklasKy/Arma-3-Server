@@ -54,6 +54,17 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Config  = Get-FrameworkConfig
 $Prof    = Get-Profile -ProfileName $Profile
 
+$branchMarkerPath = Join-Path $Config.ServerInstallPath ".arma3-server-branch"
+if (Test-Path -LiteralPath $branchMarkerPath) {
+    $installedBranch = (Get-Content -LiteralPath $branchMarkerPath -Raw).Trim().ToLowerInvariant()
+    $profileBranch = ([string]$Prof.Branch).Trim().ToLowerInvariant()
+    if ($installedBranch -ne $profileBranch) {
+        Write-Log "Profile '$Profile' requires branch '$profileBranch', but '$installedBranch' is installed." "Error"
+        Write-Log "Run .\setup\Update-Server.ps1 -Branch $profileBranch before starting this profile." "Error"
+        exit 1
+    }
+}
+
 $maintenanceLock = Enter-FrameworkMaintenanceLock -Config $Config -Purpose "server-start:$Profile"
 if ($null -eq $maintenanceLock) {
     Write-Log "Server start blocked because a framework maintenance operation is running." "Error"

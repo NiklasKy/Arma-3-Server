@@ -102,6 +102,7 @@ $script:EnvKeyMap = @{
     SERVER_INSTALL_PATH    = 'ServerInstallPath'
     STEAMCMD_PATH          = 'SteamCMDPath'
     WORKSHOP_STAGING_PATH  = 'WorkshopStagingPath'
+    SERVER_UPDATE_BRANCH   = 'ServerUpdateBranch'
     STEAM_USERNAME         = 'SteamUsername'
     STEAM_PASSWORD         = 'SteamPassword'
 }
@@ -152,8 +153,8 @@ function Get-FrameworkConfig {
     Write-Log "Config loaded from .env ($envFile)" "Info"
 
     # --- Validate required keys ---
-    # SteamUsername is only needed for Workshop mod downloads (Sync-Mods.ps1),
-    # not for server installation/updates (those use anonymous login).
+    # SteamUsername is required for Workshop downloads and for non-public
+    # Arma branches. Public dedicated-server installs use anonymous login.
     $required = @("ServerInstallPath", "SteamCMDPath", "WorkshopStagingPath")
     foreach ($key in $required) {
         $prop = $config.PSObject.Properties[$key]
@@ -165,12 +166,13 @@ function Get-FrameworkConfig {
         }
     }
 
-    # Warn if SteamUsername is still placeholder (needed later for Sync-Mods.ps1)
+    # Warn if SteamUsername is still placeholder. Callers that require an
+    # authenticated Steam session validate it as a hard requirement.
     $steamUser = $config.PSObject.Properties["SteamUsername"]
     if (-not $steamUser -or [string]::IsNullOrWhiteSpace($steamUser.Value)) {
-        Write-Log "STEAM_USERNAME is not set in .env. This is required for Sync-Mods.ps1." "Warning"
+        Write-Log "STEAM_USERNAME is not set in .env. It is required for Workshop sync and non-public branches." "Warning"
     } elseif ($steamUser.Value -eq "your_steam_username") {
-        Write-Log "STEAM_USERNAME is still set to the placeholder value. Edit your .env before running Sync-Mods.ps1." "Warning"
+        Write-Log "STEAM_USERNAME is still set to the placeholder value. Edit your .env before authenticated Steam operations." "Warning"
     }
 
     return $config
@@ -478,11 +480,15 @@ function Invoke-SteamCMD {
     .PARAMETER Username
         Steam account username. Required unless -Anonymous is set.
     .PARAMETER Password
-        Steam account password (plain text, never written to permanent storage).
-        Required unless -Anonymous is set.
+        Steam account password. It is written only to the temporary SteamCMD
+        runscript and removed in the finally block. Required unless -Anonymous
+        is set.
+    .PARAMETER PreLoginCommands
+        Commands that SteamCMD must process before login. Use this for
+        force_install_dir, which SteamCMD rejects after authentication.
     .PARAMETER Commands
         Array of SteamCMD commands to run after login, e.g.:
-          @('force_install_dir "C:\Server"', 'app_update 233780 -beta profiling validate')
+          @('app_update 233780 -beta public validate')
     .OUTPUTS
         Exit code of the SteamCMD process.
     #>
@@ -496,6 +502,8 @@ function Invoke-SteamCMD {
         [string]$Username = "",
 
         [string]$Password = "",
+
+        [string[]]$PreLoginCommands = @(),
 
         [Parameter(Mandatory)]
         [string[]]$Commands
@@ -526,7 +534,7 @@ function Invoke-SteamCMD {
 
     # Write commands to a temporary script file.
     # Using a file avoids all shell-quoting issues with special chars in passwords.
-    $scriptFile = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.steamcmd'
+    $scriptFile = [System.IO.Path]::GetTempFileName()
 
     try {
         if ($Anonymous) {
@@ -537,7 +545,8 @@ function Invoke-SteamCMD {
             Write-Log "Running SteamCMD as '$Username'..." "Info"
         }
 
-        $lines  = @($loginLine)
+        $lines  = @($PreLoginCommands)
+        $lines += $loginLine
         $lines += $Commands
         $lines += "quit"
         Set-Content -Path $scriptFile -Value $lines -Encoding ASCII
@@ -579,9 +588,10 @@ function Get-Arma3ServerBinary {
         [string]$Branch = "public"
     )
 
-    # Profiling branch ships a dedicated profiling binary; fall back to standard if missing
+    # A profiling profile must never silently start the stable executable. A
+    # missing profiling binary indicates an incomplete or wrong branch install.
     $candidates = if ($Branch -eq "profiling") {
-        @("arma3serverprofiling_x64.exe", "arma3server_x64.exe")
+        @("arma3serverprofiling_x64.exe")
     } else {
         @("arma3server_x64.exe")
     }

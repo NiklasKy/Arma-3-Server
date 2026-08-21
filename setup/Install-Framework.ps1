@@ -5,7 +5,9 @@
 
 .DESCRIPTION
     - Downloads SteamCMD to the path configured in .env (SteamCMDPath)
-    - Installs Arma 3 Dedicated Server (App ID 233780) via SteamCMD
+    - Installs the public dedicated server (App ID 233780) anonymously
+    - Installs profiling from the full Arma 3 app (App ID 107410) with the
+      Steam account configured in .env
     - Optionally selects a Steam branch (public / profiling)
 
 .PARAMETER Branch
@@ -48,6 +50,16 @@ if (-not (Test-Path $CommonScript)) {
 . $CommonScript
 
 $Config = Get-FrameworkConfig
+
+if (-not $PSBoundParameters.ContainsKey("Branch") -and
+    -not [string]::IsNullOrWhiteSpace($Config.ServerUpdateBranch)) {
+    $configuredBranch = $Config.ServerUpdateBranch.Trim().ToLowerInvariant()
+    if ($configuredBranch -notin @("public", "profiling")) {
+        Write-Log "Install-Framework supports SERVER_UPDATE_BRANCH public or profiling, got '$configuredBranch'." "Error"
+        exit 1
+    }
+    $Branch = $configuredBranch
+}
 
 # ---------------------------------------------------------------------------
 # Step 1 – Download and extract SteamCMD
@@ -96,24 +108,53 @@ if (-not $SkipServer) {
 
     New-Item -ItemType Directory -Path $Config.ServerInstallPath -Force | Out-Null
 
-    # App ID 233780 (Arma 3 Dedicated Server) is a free anonymous download.
-    # No Steam account required for server installation.
-    Write-Log "Starting SteamCMD server installation (anonymous). This may take a while..." "Info"
+    $requiresSteamAccount = $Branch -ne "public"
+    $appId = if ($requiresSteamAccount) { 107410 } else { 233780 }
+    $appUpdateCmd = "app_update $appId -beta $Branch validate"
 
-    $exitCode = Invoke-SteamCMD -SteamCMDExe $steamCmdExe `
-                                 -Anonymous `
-                                 -Commands @(
-                                     "force_install_dir `"$($Config.ServerInstallPath)`""
-                                     "app_update 233780 -beta $Branch validate"
-                                 )
+    Write-Log "Steam App ID: $appId" "Info"
+    Write-Log "Starting SteamCMD server installation. This may take a while..." "Info"
+
+    $steamCmdParams = @{
+        SteamCMDExe      = $steamCmdExe
+        PreLoginCommands = @("force_install_dir `"$($Config.ServerInstallPath)`"")
+        Commands         = @($appUpdateCmd)
+    }
+
+    if ($requiresSteamAccount) {
+        $steamUser = $Config.SteamUsername
+        if ([string]::IsNullOrWhiteSpace($steamUser) -or $steamUser -eq "your_steam_username") {
+            Write-Log "Branch '$Branch' requires STEAM_USERNAME in .env." "Error"
+            exit 1
+        }
+
+        $steamCmdParams.Username = $steamUser
+        $steamCmdParams.Password = Read-SteamPassword -Username $steamUser -Config $Config
+    } else {
+        $steamCmdParams.Anonymous = $true
+    }
+
+    $exitCode = Invoke-SteamCMD @steamCmdParams
 
     if ($exitCode -ne 0) {
         Write-Log "SteamCMD exited with code $exitCode. Check output above for errors." "Error"
         exit 1
     }
 
-    # Write appid file so tools can identify the installation
-    Set-Content -Path (Join-Path $Config.ServerInstallPath "appid") -Value "233780" -Encoding ASCII
+    $expectedBinaryName = if ($Branch -eq "profiling") {
+        "arma3serverprofiling_x64.exe"
+    } else {
+        "arma3server_x64.exe"
+    }
+    $expectedBinaryPath = Join-Path $Config.ServerInstallPath $expectedBinaryName
+    if (-not (Test-Path -LiteralPath $expectedBinaryPath)) {
+        Write-Log "SteamCMD completed but expected binary is missing: $expectedBinaryPath" "Error"
+        exit 1
+    }
+
+    # Record the installed package and branch for future updates.
+    Set-Content -LiteralPath (Join-Path $Config.ServerInstallPath "appid") -Value $appId -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $Config.ServerInstallPath ".arma3-server-branch") -Value $Branch -Encoding ASCII
 
     # Create keys directory if missing
     $keysDir = Join-Path $Config.ServerInstallPath "keys"

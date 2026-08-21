@@ -5,8 +5,9 @@
 
 .DESCRIPTION
     Acquires the framework maintenance lock, refuses to run while any
-    arma3server process is active, updates the currently installed game branch,
-    and then updates Workshop mods used by all profiles.
+    arma3server process is active, updates SERVER_UPDATE_BRANCH from .env (or
+    the last recorded branch when unset), and then updates Workshop mods used
+    by all profiles.
 
 .PARAMETER DryRun
     Perform lock and process checks without invoking SteamCMD.
@@ -51,7 +52,23 @@ try {
         Write-Log "=== Automatic Arma 3 Update ===" "Header"
 
         $serverUpdateScript = Join-Path $FrameworkRoot "setup\Update-Server.ps1"
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File $serverUpdateScript
+        $serverUpdateArgs = @(
+            "-NoProfile"
+            "-ExecutionPolicy", "Bypass"
+            "-NonInteractive"
+            "-File", $serverUpdateScript
+        )
+
+        if (-not [string]::IsNullOrWhiteSpace($Config.ServerUpdateBranch)) {
+            $updateBranch = $Config.ServerUpdateBranch.Trim().ToLowerInvariant()
+            if ($updateBranch -notin @("public", "profiling", "development")) {
+                throw "Invalid SERVER_UPDATE_BRANCH '$updateBranch' in .env."
+            }
+            Write-Log "Automatic server branch: $updateBranch" "Info"
+            $serverUpdateArgs += @("-Branch", $updateBranch)
+        }
+
+        & powershell.exe @serverUpdateArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Server update failed with exit code $LASTEXITCODE."
         }

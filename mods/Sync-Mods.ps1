@@ -525,7 +525,7 @@ try {
     Write-Log "" "Info"
     Write-Log "=== Downloading $($toDownload.Count) mod(s) in one SteamCMD session ===" "Header"
 
-    $downloadCommands = @("force_install_dir `"$($Config.WorkshopStagingPath)`"")
+    $downloadCommands = @()
     foreach ($mod in $toDownload) {
         $downloadCommands += "workshop_download_item $ArmaAppId $($mod.WorkshopId) validate"
     }
@@ -533,6 +533,9 @@ try {
     $exitCode = Invoke-SteamCMD -SteamCMDExe $SteamCmd `
                                  -Username $steamUser `
                                  -Password $steamPass `
+                                 -PreLoginCommands @(
+                                     "force_install_dir `"$($Config.WorkshopStagingPath)`""
+                                 ) `
                                  -Commands $downloadCommands
 
     if ($exitCode -ne 0) {
